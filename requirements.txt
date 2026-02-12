@@ -1,0 +1,9 @@
+streamlit
+opencv-python
+mediapipe
+numpy
+pandas
+pyzbar
+keras
+tensorflow
+pickle-mixin
