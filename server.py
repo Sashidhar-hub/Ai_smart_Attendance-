@@ -96,7 +96,9 @@ def login(request: LoginRequest):
                 "id": user["id"],
                 "name": user["name"],
                 "email": user["email"],
-                "role": user["role"]
+                "role": user["role"],
+                "student_id": user["student_id"],
+                "section": user["section"]
             }
         }
     raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -208,6 +210,21 @@ def get_sessions():
     sessions = cursor.fetchall()
     conn.close()
     return [dict(s) for s in sessions]
+
+@app.get("/attendance")
+def get_attendance(user_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT a.timestamp, a.status, a.similarity_score, s.subject
+        FROM attendance a
+        JOIN sessions s ON a.session_id = s.id
+        WHERE a.user_id = ?
+        ORDER BY a.timestamp DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 # Mock Session Creation for Testing
 @app.post("/create-test-session")
