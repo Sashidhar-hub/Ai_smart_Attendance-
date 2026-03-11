@@ -1,33 +1,39 @@
 import os
-import csv
+import sqlite3
 import pickle
 import hashlib
 import numpy as np
 import cv2
+import json
 from datetime import datetime
 import streamlit as st
 
 # Suppress TensorFlow/OneDNN warnings
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-# AI Libraries (Import inside functions to avoid startup crashes if possible, 
-# but for caching we need them at module level or handled gracefully)
+# AI Libraries
 try:
     from keras.models import load_model
+    import mediapipe as mp
     from ultralytics import YOLO
 except ImportError as e:
-    print(f"⚠️ Missing AI dependencies: {e}")
+    st.error(f"Missing AI dependencies: {e}")
 
-# Using OpenCV Haar Cascade for face detection (no extra dependencies needed)
 # Constants
-USERS_FILE = "data/users.csv"
-EMBEDDINGS_FILE = "data/embeddings.pkl"
-ATTENDANCE_FILE = "data/attendance.csv"
+DB_FILE = "attendance.db"
 MODELS_DIR = "models"
 
 # Ensure data directory exists
 os.makedirs("data", exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+# ==============================
+# 🗄 DATABASE CONNECTION
+# ==============================
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # ==============================
 # 🔐 PASSWORD HASHING
@@ -40,64 +46,100 @@ def hash_password(password):
 # ==============================
 def register_user(name, student_id, email, section, password):
     hashed_pw = hash_password(password)
-    file_exists = os.path.isfile(USERS_FILE)
-    
-    with open(USERS_FILE, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["name", "student_id", "email", "section", "password"])
-        writer.writerow([name, student_id, email, section, hashed_pw])
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO users (name, student_id, email, section, password_hash) VALUES (?, ?, ?, ?, ?)",
+            (name, student_id, email, section, hashed_pw)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        st.error("Email already registered!")
+    finally:
+        conn.close()
 
 # ==============================
 # 🔑 AUTHENTICATION
 # ==============================
 def authenticate_user(email, password):
     hashed_pw = hash_password(password)
-    if not os.path.exists(USERS_FILE):
-        return False, None
-        
-    with open(USERS_FILE, "r") as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            if row["email"] == email and row["password"] == hashed_pw:
-                return True, row["name"]
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE email = ? AND password_hash = ?", (email, hashed_pw))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if user:
+        return True, user["name"]
     return False, None
+
+# ==============================
+# 👑 ADMIN FUNCTIONS
+# ==============================
+def get_all_users():
+    """Return all registered users as a list of dictionaries"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, student_id, email, section, role FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    return [dict(u) for u in users]
+
+def get_all_attendance():
+    """Return all attendance records as a pandas DataFrame"""
+    import pandas as pd
+    conn = get_db_connection()
+    
+    query = """
+    SELECT a.timestamp, u.name, u.email, s.subject, a.status, a.similarity_score
+    FROM attendance a
+    JOIN users u ON a.user_id = u.id
+    JOIN sessions s ON a.session_id = s.id
+    ORDER BY a.timestamp DESC
+    """
+    
+    try:
+        df = pd.read_sql_query(query, conn)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
 # ==============================
 # 🧠 AI MODEL LOADING
 # ==============================
 @st.cache_resource
 def load_models():
-    """Load FaceNet and YOLO models, plus OpenCV face detector"""
+    """Load FaceNet, MediaPipe FaceDetection, and YOLO models once"""
     try:
         print("🔄 Loading models...")
         
         # Check FaceNet file
         facenet_path = os.path.join(MODELS_DIR, "facenet_keras.h5")
         if not os.path.exists(facenet_path):
-             print(f"❌ File not found: {facenet_path}. Please ensure the model file is in the 'models' folder.")
+             st.error(f"❌ File not found: {facenet_path}. Please ensure the model file is in the 'models' folder.")
              return None, None, None
 
         facenet_model = load_model(facenet_path)
         
-        # Load OpenCV Haar Cascade face detector (built into OpenCV)
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        # Initialize MediaPipe Face Detection
+        mp_face_detection = mp.solutions.face_detection
+        detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
         
         yolo_model = YOLO("yolov8n.pt")  # Auto-downloads if missing
         
         print("✅ All models loaded successfully!")
-        print("   - FaceNet: Loaded")
-        print("   - Face Detector: OpenCV Haar Cascade")
-        print("   - YOLO: Loaded")
-        return facenet_model, face_cascade, yolo_model
+        return facenet_model, detector, yolo_model
     except Exception as e:
-        print(f"❌ Model loading failed: {e}")
-        import traceback
-        traceback.print_exc()
+        st.error(f"❌ Model loading failed: {e}")
         return None, None, None
 
-# Initialize model variables as None - they will be loaded on first use
-FACENET_MODEL, DETECTOR, YOLO_MODEL = None, None, None
+# Load models globally for this module
+# Note: In Streamlit, this runs once per process/reload
+FACENET_MODEL, DETECTOR, YOLO_MODEL = load_models()
 
 # ==============================
 # 📸 IMAGE PREPROCESSING
@@ -115,122 +157,95 @@ def preprocess_face(face_img):
 # 🧬 EMBEDDING EXTRACTION
 # ==============================
 def extract_embedding(image_array):
-    """Extract 128-d embedding from an image containing a face using FaceNet"""
-    global FACENET_MODEL, DETECTOR, YOLO_MODEL
-    
-    # Load models on first use
+    """Extract 128-d embedding from an image containing a face"""
     if FACENET_MODEL is None or DETECTOR is None:
-        FACENET_MODEL, DETECTOR, YOLO_MODEL = load_models()
-    
-    if FACENET_MODEL is None:
-        print("❌ FaceNet model not loaded")
         return None
 
     try:
-        # Convert BGR -> RGB (OpenCV loads BGR, FaceNet needs RGB)
         rgb_img = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
         
-        face_roi = None
-        
-        # Try to detect face with Haar Cascade
-        if DETECTOR is not None:
-            try:
-                gray_img = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
-                faces = DETECTOR.detectMultiScale(
-                    gray_img,
-                    scaleFactor=1.05,  # More sensitive
-                    minNeighbors=3,     # Less strict
-                    minSize=(20, 20),   # Smaller minimum size
-                    flags=cv2.CASCADE_SCALE_IMAGE
-                )
-                
-                if len(faces) > 0:
-                    # Select largest face
-                    largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
-                    x, y, w, h = largest_face
-                    
-                    # Add margin
-                    margin = 20
-                    x = max(0, x - margin)
-                    y = max(0, y - margin)
-                    w = min(rgb_img.shape[1] - x, w + 2*margin)
-                    h = min(rgb_img.shape[0] - y, h + 2*margin)
-                    
-                    face_roi = rgb_img[y:y+h, x:x+w]
-                    print(f"✅ Face detected at ({x},{y}) size {w}x{h}")
-                else:
-                    print("⚠️ Haar Cascade didn't detect face, using center crop")
-            except Exception as det_error:
-                print(f"⚠️ Face detection error: {det_error}, using center crop")
-        
-        # Fallback: If no face detected, use center crop of image
-        if face_roi is None:
-            h, w = rgb_img.shape[:2]
-            # Take center 70% of image
-            crop_size = min(h, w)
-            start_y = (h - crop_size) // 2
-            start_x = (w - crop_size) // 2
-            face_roi = rgb_img[start_y:start_y+crop_size, start_x:start_x+crop_size]
-            print(f"📸 Using center crop: {crop_size}x{crop_size}")
-        
-        # Get embedding from face ROI
-        try:
-            face_input = preprocess_face(face_roi)
-            if face_input is None:
-                print("❌ Face preprocessing failed")
-                return None
+        # Optionally resize if image is too large for faster detection
+        if rgb_img.shape[1] > 640:
+            scale = 640 / rgb_img.shape[1]
+            rgb_img = cv2.resize(rgb_img, (0,0), fx=scale, fy=scale)
             
-            embedding = FACENET_MODEL.predict(face_input, verbose=0)[0]
-            print(f"✅ Embedding extracted successfully! Shape: {embedding.shape}, Mean: {embedding.mean():.4f}")
-            return embedding
-            
-        except Exception as pred_error:
-            print(f"❌ FaceNet prediction error: {str(pred_error)}")
-            import traceback
-            traceback.print_exc()
+        h, w, _ = rgb_img.shape
+
+        results = DETECTOR.process(rgb_img)
+        if not results.detections:
             return None
             
+        # Get the first/most prominent face
+        best_face = results.detections[0]
+        bboxC = best_face.location_data.relative_bounding_box
+        
+        # Convert relative coords to absolute
+        xmin = int(bboxC.xmin * w)
+        ymin = int(bboxC.ymin * h)
+        width = int(bboxC.width * w)
+        height = int(bboxC.height * h)
+        
+        margin = 10
+        x = max(0, xmin - margin)
+        y = max(0, ymin - margin)
+        w_box = min(w - x, width + 2*margin)
+        h_box = min(h - y, height + 2*margin)
+        
+        face_roi = rgb_img[y:y+h_box, x:x+w_box]
+        
+        # If the ROI is somehow empty
+        if face_roi.size == 0:
+            return None
+            
+        face_input = preprocess_face(face_roi)
+        # Assuming FaceNet outputs a single embedding vector in a batch of 1
+        embedding = FACENET_MODEL.predict(face_input, verbose=0)[0]
+        return embedding
     except Exception as e:
-        print(f"❌ Error in extract_embedding: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error extracting embedding: {e}")
         return None
 
 # ==============================
-# 💾 EMBEDDING STORAGE
+# 💾 EMBEDDING STORAGE (SQL)
 # ==============================
 def save_embedding(email, embedding):
-    if os.path.exists(EMBEDDINGS_FILE):
-        with open(EMBEDDINGS_FILE, "rb") as f:
-            try:
-                data = pickle.load(f)
-            except EOFError:
-                data = {}
-    else:
-        data = {}
-
-    data[email] = embedding
-
-    with open(EMBEDDINGS_FILE, "wb") as f:
-        pickle.dump(data, f)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get User ID
+    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        user_id = user["id"]
+        emb_json = json.dumps(embedding.tolist())
+        cursor.execute(
+            "INSERT OR REPLACE INTO embeddings (user_id, embedding_vector) VALUES (?, ?)",
+            (user_id, emb_json)
+        )
+        conn.commit()
+    
+    conn.close()
 
 def load_embedding(email):
-    if not os.path.exists(EMBEDDINGS_FILE):
-        return None
-    with open(EMBEDDINGS_FILE, "rb") as f:
-        try:
-            data = pickle.load(f)
-            return data.get(email)
-        except:
-            return None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "SELECT e.embedding_vector FROM embeddings e JOIN users u ON e.user_id = u.id WHERE u.email = ?", 
+        (email,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        return np.array(json.loads(row["embedding_vector"]))
+    return None
 
 # ==============================
 # 📏 FACE VERIFICATION
 # ==============================
 def verify_face(stored_embedding, new_embedding, threshold=0.6):
-    """Cosine similarity: 1.0 = exact match, -1.0 = opposite"""
-    # Cosine similarity formula: dot(A, B) / (norm(A) * norm(B))
-    # FaceNet embeddings are usually normalized, so dot product works.
     dot_product = np.dot(stored_embedding, new_embedding)
     norm_stored = np.linalg.norm(stored_embedding)
     norm_new = np.linalg.norm(new_embedding)
@@ -242,12 +257,10 @@ def verify_face(stored_embedding, new_embedding, threshold=0.6):
 # 👁 LIVENESS CHECK
 # ==============================
 def verify_liveness(image):
-    """Simple brightness/texture check"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     brightness = np.mean(gray)
     texture = cv2.Laplacian(gray, cv2.CV_64F).var()
     
-    # Thresholds
     if brightness > 30 and texture > 100:
         return True
     return False
@@ -256,64 +269,55 @@ def verify_liveness(image):
 # 🏫 CLASSROOM VERIFICATION
 # ==============================
 def verify_classroom(image):
-    """Detect people/chairs/tables using YOLO"""
-    global FACENET_MODEL, DETECTOR, YOLO_MODEL
-    
-    # Load models on first use
-    if YOLO_MODEL is None:
-        FACENET_MODEL, DETECTOR, YOLO_MODEL = load_models()
-    
     if YOLO_MODEL is None:
         return False, "YOLO model missing"
         
     results = YOLO_MODEL(image)
-    
-    # COCO Class IDs: 0=person, 56=chair, 67=dining table (desk)
-    # We want to see people and furniture
-    class_counts = {0: 0, 56: 0, 67: 0}
+    class_counts = {0: 0} # Person
     
     for r in results:
         for box in r.boxes:
             cls = int(box.cls[0])
-            if cls in class_counts:
-                class_counts[cls] += 1
+            if cls == 0:
+                class_counts[0] += 1
                 
-    # Logic: Need at least 1 person AND (chair OR table)
-    # Or just stricter: 1 person for now as fallback
-    has_person = class_counts[0] > 0
-    # has_furniture = (class_counts[56] + class_counts[67]) > 0
-    
-    if has_person:
+    if class_counts[0] > 0:
         return True
     return False
 
 # ==============================
-# 📝 MARK ATTENDANCE
+# 📝 MARK ATTENDANCE (SQL)
 # ==============================
-def mark_attendance(email, session_id, subject, similarity):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    file_exists = os.path.isfile(ATTENDANCE_FILE)
+def mark_attendance(email, session_code, subject, similarity):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     
-    with open(ATTENDANCE_FILE, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
-        writer.writerow([email, session_id, subject, timestamp, f"{similarity:.3f}", "Present"])
+    # Get User ID
+    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        return
 
-# ==============================
-# 👑 ADMIN FUNCTIONS
-# ==============================
-def get_all_users():
-    """Return all registered users as a list of dictionaries"""
-    if not os.path.exists(USERS_FILE):
-        return []
-    with open(USERS_FILE, "r") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
+    # Get Session ID (Create if not exists for demo, or assume pre-created)
+    # For compatibility with QR code which gives session ID string:
+    cursor.execute("SELECT id FROM sessions WHERE code = ?", (session_code,))
+    session = cursor.fetchone()
+    
+    if not session:
+        # Auto-create session if it doesn't exist (for demo continuity)
+        cursor.execute(
+            "INSERT INTO sessions (subject, code, start_time, end_time) VALUES (?, ?, ?, ?)",
+            (subject, session_code, datetime.now(), datetime.now())
+        )
+        conn.commit()
+        session_id = cursor.lastrowid
+    else:
+        session_id = session["id"]
 
-def get_all_attendance():
-    """Return all attendance records as a pandas DataFrame"""
-    import pandas as pd
-    if not os.path.exists(ATTENDANCE_FILE):
-        return pd.DataFrame(columns=["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
-    return pd.read_csv(ATTENDANCE_FILE)
+    cursor.execute(
+        "INSERT INTO attendance (user_id, session_id, status, similarity_score) VALUES (?, ?, ?, ?)",
+        (user["id"], session_id, "Present", float(similarity))
+    )
+    conn.commit()
+    conn.close()

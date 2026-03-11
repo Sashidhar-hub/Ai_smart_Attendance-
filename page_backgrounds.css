@@ -1,0 +1,75 @@
+/* Professional Educational Gradient Backgrounds for ePortal */
+
+/* Home Page - Purple to Violet */
+.page-home .stApp {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+}
+
+/* Login Page - Pink to Red */
+.page-login .stApp {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%) !important;
+}
+
+/* Register Page - Blue to Cyan */
+.page-register .stApp {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%) !important;
+}
+
+/* Dashboard - Green to Teal */
+.page-dashboard .stApp {
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%) !important;
+}
+
+/* Attendance Pages - Pink to Yellow */
+.page-attendance .stApp {
+    background: linear-gradient(135deg, #fa709a 0%, #fee140 100%) !important;
+}
+
+/* Success Page - Cyan to Purple */
+.page-success .stApp {
+    background: linear-gradient(135deg, #30cfd0 0%, #330867 100%) !important;
+}
+
+/* Overlay patterns for educational feel */
+.page-overlay::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: 
+        radial-gradient(circle at 20% 50%, rgba(255,255,255,.05) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(255,255,255,.05) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* Card styling with glassmorphism */
+.glass-card {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border-radius: 20px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    padding: 2rem;
+    margin: 2rem auto;
+}
+
+/* Success animation */
+@keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-20px); }
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: scale(0.9); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.success-icon {
+    animation: bounce 1s ease-in-out;
+}
+
+.success-card {
+    animation: fadeIn 0.5s ease-out;
+}
