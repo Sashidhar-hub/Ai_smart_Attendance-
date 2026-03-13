@@ -8,1382 +8,870 @@ import pandas as pd
 import hashlib
 import plotly.express as px
 import plotly.graph_objects as go
-from io import BytesIO
 import page_styling
+import pickle
+try:
+    import mediapipe as mp
+    mp_face = mp.solutions.face_detection
+    mp_drawing = mp.solutions.drawing_utils
+except (ImportError, AttributeError):
+    mp_face = None
+    mp_drawing = None
+from scipy.spatial.distance import cosine
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input, decode_predictions
 
 # =========================
 # SETUP & CONFIG
 # =========================
-st.set_page_config(page_title="ePortal", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Smart AI Attendance", layout="wide", page_icon="🎓")
 
-# Initialize data directories
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-
 USERS_FILE = os.path.join(DATA_DIR, "users.csv")
 ATTENDANCE_FILE = os.path.join(DATA_DIR, "attendance.csv")
-EMBEDDINGS_FILE = os.path.join(DATA_DIR, "embeddings.pkl")
 
-# Initialize CSV files
-if not os.path.exists(USERS_FILE):
-    df = pd.DataFrame(columns=["email", "name", "student_id", "section", "password_hash"])
-    df.to_csv(USERS_FILE, index=False)
+def init_data_file(file_path, cols):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        pd.DataFrame(columns=cols).to_csv(file_path, index=False)
 
-if not os.path.exists(ATTENDANCE_FILE):
-    df = pd.DataFrame(columns=["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
-    df.to_csv(ATTENDANCE_FILE, index=False)
+init_data_file(USERS_FILE, ["email", "name", "student_id", "section", "password_hash"])
+init_data_file(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
 
-if not os.path.exists(EMBEDDINGS_FILE):
-    with open(EMBEDDINGS_FILE, "wb") as f:
-        import pickle
-        pickle.dump({}, f)
+def safe_read_csv(file_path, default_cols):
+    try:
+        return pd.read_csv(file_path)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return pd.DataFrame(columns=default_cols)
 
 # =========================
-# UTILITY FUNCTIONS
+# GLOBAL CSS — BASE44 REPLICATION
+# =========================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+
+/* Full page background */
+.stApp { background: #F9FAFB !important; }
+
+/* Hide Streamlit chrome */
+#MainMenu, footer, header, .stDeployButton { visibility: hidden; }
+[data-testid="stSidebar"], [data-testid="collapsedControl"] { display: none !important; }
+
+/* Max-width content area */
+.block-container {
+    max-width: 1000px !important;
+    padding-top: 0rem !important;
+    padding-bottom: 3rem !important;
+}
+
+/* ===== STICKY NAV BAR ===== */
+.top-nav {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: white;
+    border-bottom: 1px solid #E5E7EB;
+    padding: 0.75rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 -100% 1.5rem;
+    padding: 0.75rem calc(100% - 500px + 2rem);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+/* Adjusting navbar for wider screen */
+@media (max-width: 1000px) {
+    .top-nav { padding: 0.75rem 1rem; margin: 0 0 1.5rem; }
+}
+
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #111827;
+}
+.nav-logo-icon {
+    background: #2563EB;
+    color: white;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}
+.nav-links { display: flex; align-items: center; gap: 1.5rem; }
+.nav-link {
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #4B5563;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+.nav-link:hover { background: #F3F4F6; }
+.nav-link.active { color: #2563EB; font-weight: 600; }
+.nav-logout { color: #EF4444 !important; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.3rem; }
+
+/* ===== HERO PROFILE CARD ===== */
+.hero-card {
+    background: #2563EB;
+    border-radius: 24px;
+    padding: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2rem;
+    color: white;
+    position: relative;
+    overflow: hidden;
+}
+.profile-section { display: flex; align-items: center; gap: 1.5rem; }
+.profile-img {
+    width: 80px; height: 80px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2rem; border: 3px solid rgba(255,255,255,0.3);
+}
+.profile-text h2 { font-size: 2rem; font-weight: 800; margin: 0; color: white; }
+.profile-text p { color: rgba(255,255,255,0.8); font-size: 0.95rem; margin: 0.2rem 0 0; }
+.trend-widget {
+    background: rgba(255,255,255,0.15);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 16px;
+    padding: 1rem 1.5rem;
+    text-align: center;
+}
+.trend-widget small { font-size: 0.8rem; color: rgba(255,255,255,0.8); display: block; margin-bottom: 0.2rem; }
+.trend-widget strong { font-size: 1.8rem; font-weight: 800; }
+
+/* ===== STATS GRID ===== */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1.25rem;
+    margin-bottom: 2.5rem;
+}
+.stat-item {
+    background: white;
+    border-radius: 18px;
+    padding: 1.5rem;
+    border: 1px solid #F3F4F6;
+    display: flex;
+    flex-direction: column;
+}
+.stat-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }
+.stat-header span { color: #6B7280; font-size: 0.85rem; font-weight: 500; }
+.stat-icon {
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; font-size: 1.2rem;
+}
+.stat-val { font-size: 1.8rem; font-weight: 800; color: #111827; }
+.stat-sub { color: #9CA3AF; font-size: 0.75rem; margin-top: 0.4rem; }
+
+/* Colors */
+.bg-blue { background: #EFF6FF; color: #3B82F6; }
+.bg-green { background: #ECFDF5; color: #10B981; }
+.bg-purple { background: #F5F3FF; color: #8B5CF6; }
+.bg-orange { background: #FFF7ED; color: #F97316; }
+
+/* ===== QUICK ACTIONS ===== */
+.actions-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    margin-bottom: 2.5rem;
+}
+.action-item {
+    background: white;
+    border-radius: 18px;
+    padding: 1.5rem;
+    border: 1px solid #E5E7EB;
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+.action-item:hover { border-color: #2563EB; box-shadow: 0 10px 15px -3px rgba(37,99,235,0.1); }
+.action-ico {
+    width: 54px; height: 54px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem;
+}
+.act-blue { background: #2563EB; color: white; }
+.act-green { background: #10B981; color: white; }
+.action-info h4 { font-size: 1rem; font-weight: 700; color: #111827; margin: 0 0 0.2rem; }
+.action-info p { font-size: 0.85rem; color: #6B7280; margin: 0; }
+.action-item i { margin-left: auto; color: #D1D5DB; font-size: 1.2rem; }
+
+/* ===== RECENT ATTENDANCE ===== */
+.section-head { font-size: 1.1rem; font-weight: 700; color: #111827; margin-bottom: 1rem; }
+.list-container { background: transparent; display: flex; flex-direction: column; gap: 0.75rem; }
+.list-row {
+    background: white;
+    padding: 1rem 1.5rem;
+    border-radius: 16px;
+    border: 1px solid #F3F4F6;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+.list-ico {
+    width: 40px; height: 40px;
+    background: #ECFDF5;
+    color: #10B981;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; font-size: 1.1rem;
+}
+.list-details { flex: 1; }
+.list-details h5 { font-size: 0.95rem; font-weight: 600; color: #111827; margin: 0; }
+.list-details small { color: #6B7280; font-size: 0.8rem; }
+.list-right { text-align: right; }
+.badge-p {
+    background: #ECFDF5; color: #059669;
+    padding: 0.25rem 0.75rem; border-radius: 20px;
+    font-size: 0.75rem; font-weight: 700;
+}
+.match-p { color: #9CA3AF; font-size: 0.75rem; margin-top: 0.25rem; }
+
+/* ===== SCANNER UI ===== */
+.scanner-frame {
+    width: 100%; max-width: 500px;
+    aspect-ratio: 1;
+    background: #0F172A;
+    border-radius: 32px;
+    margin: 2rem auto;
+    position: relative;
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+}
+.scan-line {
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 3px;
+    background: #3B82F6;
+    box-shadow: 0 0 15px #3B82F6;
+    animation: scan 2s linear infinite;
+    z-index: 10;
+}
+@keyframes scan {
+    0% { top: 0; }
+    100% { top: 100%; }
+}
+.corner {
+    position: absolute; width: 40px; height: 40px;
+    border: 4px solid #3B82F6;
+}
+.tl { top: 40px; left: 40px; border-right: 0; border-bottom: 0; border-top-left-radius: 12px; }
+.tr { top: 40px; right: 40px; border-left: 0; border-bottom: 0; border-top-right-radius: 12px; }
+.bl { bottom: 40px; left: 40px; border-right: 0; border-top: 0; border-bottom-left-radius: 12px; }
+.br { bottom: 40px; right: 40px; border-left: 0; border-top: 0; border-bottom-right-radius: 12px; }
+
+/* ===== BUTTONS ===== */
+.stButton > button {
+    background: #2563EB !important;
+    border-radius: 12px !important;
+    border: none !important;
+    padding: 0.6rem 1.25rem !important;
+    font-weight: 600 !important;
+    transition: all 0.2s !important;
+}
+.stButton > button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37,99,235,0.2); }
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
+# UTILITIES
+# =========================
+# AI UTILITIES
+# =========================
+@st.cache_resource
+def load_face_model():
+    # Lazy load for performance
+    try:
+        from tensorflow.keras.models import load_model
+        model_path = os.path.join("models", "facenet_keras.h5")
+        if os.path.exists(model_path):
+            model = load_model(model_path)
+            # Dummy predict to initialize
+            model.predict(np.zeros((1, 160, 160, 3)))
+            return model
+    except Exception as e:
+        print(f"Error loading AI model: {e}")
+    return None
+
+# mp_face and mp_drawing are now imported at the top level
+
+def get_face_embedding(image_np, model):
+    if model is None: return None
+    try:
+        # Preprocess: resize to 160x160, normalize
+        face_img = cv2.resize(image_np, (160, 160))
+        face_img = face_img.astype('float32')
+        mean, std = face_img.mean(), face_img.std()
+        face_img = (face_img - mean) / std
+        samples = np.expand_dims(face_img, axis=0)
+        yhat = model.predict(samples)
+        return yhat[0]
+    except:
+        return None
+
+@st.cache_resource
+def load_object_model():
+    try:
+        return MobileNetV2(weights='imagenet')
+    except Exception as e:
+        st.error(f"Error loading Object Detection model: {e}")
+    return None
+
+def verify_liveness(image_np):
+    # Basic check for person presence and movement (simulated)
+    return True 
+
+def detect_classroom_objects(image_np):
+    model = load_object_model()
+    if model is None: return ["unknown"]
+    
+    try:
+        # Preprocess for MobileNetV2
+        img = cv2.resize(image_np, (224, 224))
+        x = np.expand_dims(img, axis=0)
+        x = preprocess_input(x)
+        
+        preds = model.predict(x)
+        decoded = decode_predictions(preds, top=10)[0]
+        
+        # Classroom keywords in ImageNet
+        keywords = ["desk", "computer", "keyboard", "monitor", "notebook", "projector", "chair", "table", "screen", "person"]
+        detected = []
+        for _, label, score in decoded:
+            if score > 0.1: # Confidence threshold
+                # Check if label contains any keyword
+                if any(kw in label.lower() for kw in keywords):
+                    detected.append(label.replace("_", " "))
+        
+        return list(set(detected)) if detected else ["background"]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
+# =========================
+# DATA UTILITIES
+# =========================
+EMBEDDINGS_FILE = os.path.join(DATA_DIR, "embeddings.pkl")
+
+def save_embedding(email, embedding):
+    data = {}
+    if os.path.exists(EMBEDDINGS_FILE):
+        with open(EMBEDDINGS_FILE, "rb") as f:
+            data = pickle.load(f)
+    data[email] = embedding
+    with open(EMBEDDINGS_FILE, "wb") as f:
+        pickle.dump(data, f)
+
+def get_embedding(email):
+    if os.path.exists(EMBEDDINGS_FILE):
+        with open(EMBEDDINGS_FILE, "rb") as f:
+            data = pickle.load(f)
+            return data.get(email)
+    return None
+
 # =========================
 def hash_pwd(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def load_users():
-    return pd.read_csv(USERS_FILE)
+    return safe_read_csv(USERS_FILE, ["email", "name", "student_id", "section", "password_hash"])
 
 def save_user(name, sid, email, section, pwd):
     df = load_users()
     if email in df["email"].values:
         return False
-    new_row = {"email": email, "name": name, "student_id": sid, "section": section, "password_hash": hash_pwd(pwd)}
-    df.loc[len(df)] = new_row
+    df.loc[len(df)] = {"email": email, "name": name, "student_id": sid, "section": section, "password_hash": hash_pwd(pwd)}
     df.to_csv(USERS_FILE, index=False)
     return True
 
-def authenticate_user(email, pwd):
-    df = load_users()
-    user = df[df["email"] == email]
-    if user.empty:
-        return False, None
-    stored_hash = user.iloc[0]["password_hash"]
-    if hash_pwd(pwd) == stored_hash:
-        return True, user.iloc[0]["name"]
-    return False, None
-
-def verify_liveness(img):
-    """Simple liveness check using brightness and texture"""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    brightness = np.mean(gray)
-    texture = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return brightness > 30 and texture > 80
-
-def verify_classroom(img):
-    """Simple classroom check - always returns True for demo"""
-    # In production, you could add actual classroom detection
-    # For now, just check if image is valid
-    return img is not None and img.size > 0
-
-def mark_attendance(email, session_id, subject, similarity):
-    df = pd.read_csv(ATTENDANCE_FILE)
-    new_row = {
-        "email": email,
-        "session_id": session_id,
-        "subject": subject,
-        "timestamp": datetime.now(),
-        "similarity_score": similarity,
-        "status": "Present"
-    }
-    df.loc[len(df)] = new_row
-    df.to_csv(ATTENDANCE_FILE, index=False)
-
-def load_attendance_data(email):
-    df = pd.read_csv(ATTENDANCE_FILE)
-    return df[df["email"] == email].copy()
-
-def calculate_statistics(attendance_df):
-    """Calculate attendance statistics"""
-    total_classes = len(attendance_df)
-    present_count = len(attendance_df[attendance_df['status'] == 'Present'])
-    absent_count = total_classes - present_count
-    attendance_percentage = (present_count / total_classes * 100) if total_classes > 0 else 0
+def get_stats(email):
+    df = safe_read_csv(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
+    df_user = df[df["email"] == email]
+    if df_user.empty:
+        return {"total": 0, "month": 0, "rate": 0, "monthly_rate": 0}
     
-    # Calculate streak (consecutive present days)
-    attendance_df_sorted = attendance_df.sort_values('timestamp')
-    present_days = attendance_df_sorted[attendance_df_sorted['status'] == 'Present']
-    current_streak = len(present_days.tail(7))  # Last 7 days
+    now = datetime.now()
+    df_user["timestamp"] = pd.to_datetime(df_user["timestamp"])
+    this_month = df_user[(df_user["timestamp"].dt.month == now.month) & (df_user["timestamp"].dt.year == now.year)]
+    
+    total = len(df_user)
+    present = len(df_user[df_user["status"] == "Present"])
+    month_total = len(this_month)
+    month_present = len(this_month[this_month["status"] == "Present"])
     
     return {
-        'total_classes': total_classes,
-        'present_count': present_count,
-        'absent_count': absent_count,
-        'attendance_percentage': attendance_percentage,
-        'current_streak': current_streak
+        "total": total,
+        "month": month_total,
+        "rate": round(present / total * 100) if total > 0 else 0,
+        "monthly_rate": round(month_present / month_total * 100) if month_total > 0 else 0
     }
 
-def calculate_subject_stats(attendance_df):
-    """Calculate subject-wise statistics"""
-    subject_stats = attendance_df.groupby('subject').agg({
-        'status': lambda x: (x == 'Present').sum(),
-        'similarity_score': 'mean'
-    }).reset_index()
-    subject_stats.columns = ['subject', 'present_count', 'avg_similarity']
-    return subject_stats
-
-def create_bar_chart(subject_stats):
-    """Create bar chart for subject-wise attendance"""
-    fig = px.bar(
-        subject_stats,
-        x='subject',
-        y='present_count',
-        title='Classes Attended by Subject',
-        labels={'present_count': 'Number of Classes', 'subject': 'Subject'},
-        color='present_count',
-        color_continuous_scale='viridis'
-    )
-    fig.update_layout(height=400)
-    return fig
-
-def create_pie_chart(stats):
-    """Create pie chart for overall attendance distribution"""
-    fig = px.pie(
-        values=[stats['present_count'], stats['absent_count']],
-        names=['Present', 'Absent'],
-        title='Attendance Distribution',
-        color_discrete_sequence=['#00CC96', '#EF553B']
-    )
-    fig.update_layout(height=400)
-    return fig
-
-def create_line_chart(attendance_df):
-    """Create line chart for attendance trend"""
-    if attendance_df.empty:
-        fig = go.Figure()
-        fig.add_annotation(text="No data available", xref="paper", yref="paper",
-                         x=0.5, y=0.5, showarrow=False, font_size=20)
-        fig.update_layout(title="Attendance Trend Over Time", height=400)
-        return fig
-    
-    # Group by date
-    attendance_df['date'] = pd.to_datetime(attendance_df['timestamp']).dt.date
-    daily_stats = attendance_df.groupby('date').size().reset_index(name='count')
-    
-    fig = px.line(
-        daily_stats,
-        x='date',
-        y='count',
-        title='Daily Attendance Count',
-        labels={'count': 'Classes Attended', 'date': 'Date'}
-    )
-    fig.update_layout(height=400)
-    return fig
-
-def format_attendance_table(attendance_df):
-    """Format attendance dataframe for display"""
-    display_df = attendance_df.copy()
-    display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M')
-    display_df = display_df.rename(columns={
-        'subject': 'Subject',
-        'timestamp': 'Date & Time',
-        'similarity_score': 'Match Score',
-        'status': 'Status'
-    })
-    display_df['Match Score'] = (display_df['Match Score'] * 100).round(1).astype(str) + '%'
-    return display_df[['Subject', 'Date & Time', 'Status', 'Match Score']].sort_values('Date & Time', ascending=False)
-
-# =========================
-# REFERENCE DESIGN CSS
-# =========================
-st.markdown("""
-<style>
-    /* Import Google Fonts */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    
-    /* Global Reset */
-    * {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        margin: 0;
-        padding: 0;
-    }
-    
-    /* Hide Streamlit Elements */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stDeployButton {display: none;}
-    
-    /* Main App Background */
-    /* .stApp {
-        background-color: #F9FAFB;
-    } */
-    
-    /* Completely Hide Sidebar */
-    [data-testid="stSidebar"] {
-        display: none !important;
-    }
-    
-    [data-testid="collapsedControl"] {
-        display: none !important;
-    }
-    
-    /* Center all content */
-    .block-container {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding-top: 2rem;
-    }
-    
-    /* Simple Top Header (optional) */
-    .app-header {
-        text-align: center;
-        padding: 2rem 0 1rem 0;
-        background: white;
-        border-bottom: 1px solid #E5E7EB;
-        margin-bottom: 2rem;
-    }
-    
-    .app-header h1 {
-        font-size: 2.5rem;
-        color: #000000;
-        margin: 0;
-        font-weight: 700;
-    }
-    
-    .app-header p {
-        color: #1F2937;
-        margin: 0.5rem 0 0 0;
-        font-size: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        cursor: pointer;
-        transition: color 0.2s;
-    }
-    
-    .top-nav-item:hover {
-        color: #2563EB;
-    }
-    
-    .top-nav-item.logout {
-        color: #EF4444;
-    }
-    
-    /* Main Content Area */
-    .main-content {
-        margin-top: 80px;
-        padding: 2rem;
-        max-width: 1200px;
-        margin-left: auto;
-        margin-right: auto;
-    }
-    
-    /* Centered Card */
-    .centered-card {
-        background: white;
-        border-radius: 16px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
-        padding: 3rem;
-        max-width: 440px;
-        margin: 4rem auto;
-    }
-    
-    /* Icon Circle */
-    .icon-circle {
-        width: 64px;
-        height: 64px;
-        background: #2563EB;
-        border-radius: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: 0 auto 1.5rem;
-        font-size: 2rem;
-    }
-    
-    /* Headings */
-    h1 {
-        font-size: 1.75rem;
-        font-weight: 700;
-        color: #1F2937;
-        text-align: center;
-        margin-bottom: 0.5rem;
-    }
-    
-    h2 {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #1F2937;
-    }
-    
-    h3 {
-        font-size: 1.25rem;
-        font-weight: 600;
-        color: #1F2937;
-    }
-    
-    /* Subtitle */
-    .subtitle {
-        text-align: center;
-        color: #6B7280;
-        margin-bottom: 2rem;
-        font-size: 0.95rem;
-    }
-    
-    /* Form Labels */
-    .stTextInput label, .stPasswordInput label {
-        font-weight: 500;
-        color: #374151;
-        font-size: 0.9rem;
-        margin-bottom: 0.5rem;
-    }
-    
-    /* Input Fields */
-    .stTextInput > div > div > input,
-    .stPasswordInput > div > div > input {
-        border-radius: 8px;
-        border: 1px solid #D1D5DB;
-        padding: 0.75rem 1rem;
-        font-size: 0.95rem;
-        transition: all 0.2s;
-    }
-    
-    .stTextInput > div > div > input:focus,
-    .stPasswordInput > div > div > input:focus {
-        border-color: #2563EB;
-        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-    }
-    
-    /* Button Styling */
-    .stButton > button {
-        background: linear-gradient(135deg, #2563EB, #1D4ED8);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.75rem 2rem;
-        font-weight: 600;
-        font-size: 1rem;
-        cursor: pointer;
-        transition: all 0.3s;
-        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
-    }
-    
-    /* Alert Messages - Make Text Visible */
-    .stAlert {
-        border-radius: 8px;
-        padding: 1rem;
-    }
-    
-    .stAlert > div {
-        color: #000000 !important;
-        font-weight: 500;
-    }
-    
-    /* Error Messages */
-    [data-testid="stNotificationContentError"],
-    [data-testid="stNotificationContentError"] > div,
-    .stAlert[data-baseweb="notification"][kind="error"] > div {
-        color: #991B1B !important;
-        background-color: #FEE2E2 !important;
-    }
-    
-    /* Success Messages */
-    [data-testid="stNotificationContentSuccess"],
-    [data-testid="stNotificationContentSuccess"] > div,
-    .stAlert[data-baseweb="notification"][kind="success"] > div {
-        color: #065F46 !important;
-        background-color: #D1FAE5 !important;
-    }
-    
-    /* Info Messages */
-    [data-testid="stNotificationContentInfo"],
-    [data-testid="stNotificationContentInfo"] > div,
-    .stAlert[data-baseweb="notification"][kind="info"] > div {
-        color: #1E40AF !important;
-        background-color: #DBEAFE !important;
-    }
-    
-    /* Warning Messages */
-    [data-testid="stNotificationContentWarning"],
-    [data-testid="stNotificationContentWarning"] > div,
-    .stAlert[data-baseweb="notification"][kind="warning"] > div {
-        color: #92400E !important;
-        background-color: #FEF3C7 !important;
-    }
-    
-    .stButton > button:hover {
-        background: #1D4ED8;
-        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
-    }
-    
-    /* Link Text */
-    .link-text {
-        text-align: center;
-        margin-top: 1.5rem;
-        color: #6B7280;
-        font-size: 0.9rem;
-    }
-    
-    .link-text a {
-        color: #2563EB;
-        text-decoration: none;
-        font-weight: 500;
-    }
-    
-    .link-text a:hover {
-        text-decoration: underline;
-    }
-    
-    /* Back Link */
-    .back-link {
-        color: #6B7280;
-        text-decoration: none;
-        font-size: 0.9rem;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        margin-bottom: 2rem;
-        cursor: pointer;
-    }
-    
-    .back-link:hover {
-        color: #2563EB;
-    }
-    
-    /* Dashboard Banner */
-    .dashboard-banner {
-        background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
-        border-radius: 16px;
-        padding: 2rem;
-        color: white;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 2rem;
-    }
-    
-    .dashboard-profile {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-    }
-    
-    .profile-photo {
-        width: 64px;
-        height: 64px;
-        border-radius: 50%;
-        background: white;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #2563EB;
-    }
-    
-    .profile-info h2 {
-        color: white;
-        font-size: 1.75rem;
-        margin-bottom: 0.25rem;
-    }
-    
-    .profile-info p {
-        color: rgba(255, 255, 255, 0.9);
-        font-size: 0.95rem;
-    }
-    
-    .month-stat {
-        text-align: right;
-    }
-    
-    .month-stat p {
-        color: rgba(255, 255, 255, 0.9);
-        font-size: 0.9rem;
-        margin-bottom: 0.25rem;
-    }
-    
-    .month-stat h1 {
-        color: white;
-        font-size: 3rem;
-        margin: 0;
-    }
-    
-    /* Stats Grid */
-    .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 1.5rem;
-        margin-bottom: 2rem;
-    }
-    
-    .stat-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    }
-    
-    .stat-card p {
-        color: #6B7280;
-        font-size: 0.85rem;
-        margin-bottom: 0.5rem;
-    }
-    
-    .stat-card h2 {
-        font-size: 2rem;
-        margin-bottom: 0.25rem;
-    }
-    
-    .stat-card small {
-        color: #9CA3AF;
-        font-size: 0.8rem;
-    }
-    
-    /* Quick Actions */
-    .quick-actions {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 1.5rem;
-        margin-bottom: 2rem;
-    }
-    
-    .action-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    
-    .action-card:hover {
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        transform: translateY(-2px);
-    }
-    
-    .action-icon {
-        width: 48px;
-        height: 48px;
-        border-radius: 10px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.5rem;
-    }
-    
-    .action-icon.blue {
-        background: #EFF6FF;
-        color: #2563EB;
-    }
-    
-    .action-icon.green {
-        background: #ECFDF5;
-        color: #10B981;
-    }
-    
-    /* Recent Attendance List */
-    .attendance-list {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    }
-    
-    .attendance-item {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 1rem 0;
-        border-bottom: 1px solid #F3F4F6;
-    }
-    
-    .attendance-item:last-child {
-        border-bottom: none;
-    }
-    
-    .attendance-info h4 {
-        font-size: 1rem;
-        font-weight: 600;
-        color: #1F2937;
-        margin-bottom: 0.25rem;
-    }
-    
-    .attendance-info p {
-        font-size: 0.85rem;
-        color: #6B7280;
-    }
-    
-    .attendance-status {
-        text-align: right;
-    }
-    
-    .status-badge {
-        background: #ECFDF5;
-        color: #059669;
-        padding: 0.25rem 0.75rem;
-        border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        display: inline-block;
-        margin-bottom: 0.25rem;
-    }
-    
-    .match-score {
-        font-size: 0.85rem;
-        color: #6B7280;
-    }
-    
-    /* Step Tabs */
-    .step-tabs {
-        display: flex;
-        justify-content: center;
-        gap: 1rem;
-        margin: 2rem 0;
-    }
-    
-    .step-tab {
-        background: white;
-        border: 1px solid #E5E7EB;
-        border-radius: 8px;
-        padding: 0.75rem 1.5rem;
-        font-weight: 500;
-        color: #6B7280;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    
-    .step-tab.active {
-        background: #2563EB;
-        color: white;
-        border-color: #2563EB;
-    }
-    
-    /* Session Info */
-    .session-info {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 2rem;
-        padding: 1rem;
-        background: white;
-        border-radius: 8px;
-    }
-    
-    .session-info div {
-        text-align: center;
-    }
-    
-    .session-info p {
-        color: #6B7280;
-        font-size: 0.85rem;
-        margin-bottom: 0.25rem;
-    }
-    
-    .session-info h4 {
-        color: #1F2937;
-        font-size: 1rem;
-        font-weight: 600;
-    }
-    
-    /* Camera Card */
-    .camera-card {
-        background: white;
-        border-radius: 16px;
-        padding: 2rem;
-        max-width: 600px;
-        margin: 0 auto;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
-    }
-    
-    .camera-card h2 {
-        text-align: center;
-        margin-bottom: 0.5rem;
-        color: #000000;
-        font-weight: 600;
-    }
-    
-    .camera-card p {
-        text-align: center;
-        color: #6B7280;
-        margin-bottom: 1.5rem;
-    }
-    
-    /* Success Screen */
-    .success-screen {
-        text-align: center;
-        max-width: 500px;
-        margin: 4rem auto;
-    }
-    
-    .success-icon {
-        width: 80px;
-        height: 80px;
-        background: #ECFDF5;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: 0 auto 1.5rem;
-        font-size: 2.5rem;
-        color: #10B981;
-    }
-    
-    .success-details {
-        background: white;
-        border-radius: 12px;
-        padding: 2rem;
-        margin: 2rem 0;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    }
-    
-    .detail-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 0.75rem 0;
-        border-bottom: 1px solid #F3F4F6;
-    }
-    
-    .detail-row:last-child {
-        border-bottom: none;
-    }
-    
-    .detail-label {
-        color: #6B7280;
-        font-weight: 500;
-    }
-    
-    .detail-value {
-        color: #1F2937;
-        font-weight: 600;
-    }
-    
-    /* Badge */
-    .badge {
-        position: absolute;
-        top: 1rem;
-        right: 1rem;
-        background: #10B981;
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
-    }
-    
-    /* Camera Input Styling */
-    [data-testid="stCameraInput"] > div {
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    
-    /* Subject Cards */
-    .subjects-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 1.5rem;
-        margin: 2rem 0;
-    }
-    
-    .subject-card {
-        background: white;
-        border-radius: 12px;
-        padding: 2rem 1.5rem;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
-        cursor: pointer;
-        transition: all 0.3s;
-        text-align: center;
-        border: 2px solid transparent;
-    }
-    
-    .subject-card:hover {
-        transform: translateY(-4px);
-        box-shadow: 0 8px 16px rgba(37, 99, 235, 0.15);
-        border-color: #2563EB;
-    }
-    
-    .subject-icon {
-        font-size: 2.5rem;
-        margin-bottom: 1rem;
-    }
-    
-    .subject-name {
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: #1F2937;
-        margin: 0;
-    }
-    
-    /* Hide Sidebar */
-    [data-testid="stSidebar"] {
-        display: none;
-    }
-    
-    /* Responsive */
-    @media (max-width: 768px) {
-        .stats-grid {
-            grid-template-columns: repeat(2, 1fr);
-        }
-        
-        .quick-actions {
-            grid-template-columns: 1fr;
-        }
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# =========================
-# SESSION STATE INIT
-# =========================
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "email" not in st.session_state:
-    st.session_state.email = None
-if "name" not in st.session_state:
-    st.session_state.name = None
-if "student_id" not in st.session_state:
-    st.session_state.student_id = None
-if "section" not in st.session_state:
-    st.session_state.section = None
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "home"
-if "current_session" not in st.session_state:
-    st.session_state.current_session = None
-if "attendance_step" not in st.session_state:
-    st.session_state.attendance_step = 1
-if "selfie_image" not in st.session_state:
-    st.session_state.selfie_image = None
-if "classroom_image" not in st.session_state:
-    st.session_state.classroom_image = None
-if "liveness_passed" not in st.session_state:
-    st.session_state.liveness_passed = False
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
-if "selected_subject" not in st.session_state:
-    st.session_state.selected_subject = None
-if "show_success" not in st.session_state:
-    st.session_state.show_success = False
-
-# =========================
-# NAVIGATION FUNCTIONS
-# =========================
 def navigate_to(page):
     st.session_state.current_page = page
     st.rerun()
 
-def logout():
-    st.session_state.logged_in = False
-    st.session_state.email = None
-    st.session_state.name = None
-    st.session_state.student_id = None
-    st.session_state.section = None
-    st.session_state.current_page = "home"
-    st.session_state.current_session = None
-    st.session_state.attendance_step = 1
-    st.session_state.is_admin = False
-    st.session_state.selected_subject = None
-    st.session_state.show_success = False
-    st.rerun()
-
 # =========================
-# HOME PAGE
+# COMPONENTS
 # =========================
-if st.session_state.current_page == "home" and not st.session_state.logged_in:
-    st.markdown("<div class='main-content'>", unsafe_allow_html=True)
-    page_styling.set_page_background('home')
-    
-    # Simple home page
+def render_nav(active="dashboard"):
+    # Apply custom style for the navbar buttons to make them look like links
     st.markdown("""
-        <div style='text-align: center; margin-top: 4rem;'>
-            <h1 style='font-size: 3.5rem; color: #000000; margin-bottom: 1rem; font-weight: 700;'>🎓 ePortal</h1>
-            <p style='font-size: 1.2rem; color: #1F2937; margin-bottom: 3rem;'>Secure, Intelligent, and Effortless Attendance Management</p>
-        </div>
+        <style>
+        .nav-btn button {
+            background: transparent !important;
+            color: #4B5563 !important;
+            border: none !important;
+            padding: 0.4rem 0.6rem !important;
+            font-weight: 500 !important;
+            font-size: 0.9rem !important;
+            box-shadow: none !important;
+            width: auto !important;
+        }
+        .nav-btn-active button {
+            color: #2563EB !important;
+            font-weight: 700 !important;
+        }
+        .nav-btn-logout button {
+            color: #EF4444 !important;
+        }
+        </style>
     """, unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns([1, 1, 1])
+    # Outer container for sticky look
+    st.markdown('<div class="top-nav-placeholder"></div>', unsafe_allow_html=True)
     
-    with col2:
-        if st.button("🔐 Sign In", key="home_login"):
-            navigate_to("login")
-        if st.button("📝 Create Account", key="home_register"):
-            navigate_to("register")
+    # Navbar using Columns
+    nc1, nc2, nc3, nc4, nc5, nc6 = st.columns([3, 1, 1.2, 1, 1, 1])
     
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =========================
-# REGISTRATION PAGE
-# =========================
-elif st.session_state.current_page == "register":
-    st.markdown("<div class='main-content'>", unsafe_allow_html=True)
-    page_styling.set_page_background('register')
-    
-    # Back to Home link
-    if st.button("← Back to Home", key="back_home_reg"):
-        navigate_to("home")
-    
-    st.markdown("""
-        <div class='centered-card'>
-            <div class='icon-circle'>👤</div>
-            <h1>Create Account</h1>
-            <p class='subtitle'>Join ePortal</p>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # Form inside the card styling
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        name = st.text_input("Full Name", placeholder="John Doe", key="reg_name")
-        sid = st.text_input("Student ID", placeholder="STU2024001", key="reg_sid")
-        email = st.text_input("Email Address", placeholder="john@university.edu", key="reg_email")
-        section = st.text_input("Class / Section", placeholder="CS-2024-A", key="reg_section")
-        password = st.text_input("Password", type="password", placeholder="••••••", key="reg_password")
-        confirm_password = st.text_input("Confirm Password", type="password", placeholder="••••••", key="reg_confirm")
-        
-        if st.button("✓ Create Account", key="register_btn"):
-            if name and sid and email and section and password:
-                if password == confirm_password:
-                    if save_user(name, sid, email, section, password):
-                        st.success("✅ Account created successfully!")
-                        st.balloons()
-                        navigate_to("login")
-                    else:
-                        st.error("❌ Email already registered")
-                else:
-                    st.error("❌ Passwords do not match")
-            else:
-                st.error("❌ Please fill all fields")
-        
-        if st.button("Sign in", key="goto_login"):
-            navigate_to("login")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =========================
-# LOGIN PAGE
-# =========================
-elif st.session_state.current_page == "login":
-    st.markdown("<div class='main-content'>", unsafe_allow_html=True)
-    page_styling.set_page_background('login')
-    
-    # Back to Home link
-    if st.button("← Back to Home", key="back_home_login"):
-        navigate_to("home")
-    
-    st.markdown("""
-        <div class='centered-card'>
-            <div class='icon-circle'>🔐</div>
-            <h1>Welcome Back</h1>
-            <p class='subtitle'>Sign in to your account</p>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        email = st.text_input("Student ID or Email", placeholder="STU2024001 or john@university.edu", key="login_email")
-        password = st.text_input("Password", type="password", placeholder="••••••", key="login_password")
-        
-        if st.button("→ Sign In", key="login_btn"):
-            # Admin Login
-            if email == "admin@smartai.com" and password == "admin123":
-                st.session_state.logged_in = True
-                st.session_state.email = email
-                st.session_state.name = "Administrator"
-                st.session_state.is_admin = True
-                navigate_to("dashboard")
-            
-            # Student Login
-            else:
-                success, name = authenticate_user(email, password)
-                
-                if success:
-                    # Get user details
-                    df = load_users()
-                    user_row = df[df["email"] == email].iloc[0]
-                    st.session_state.student_id = user_row["student_id"]
-                    st.session_state.section = user_row["section"]
-                    
-                    st.session_state.logged_in = True
-                    st.session_state.email = email
-                    st.session_state.name = name
-                    st.session_state.is_admin = False
-                    navigate_to("dashboard")
-                else:
-                    st.error("❌ Invalid credentials")
-        
-        if st.button("Create one", key="goto_register"):
-            navigate_to("register")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =========================
-# DASHBOARD - NEW DESIGN
-# =========================
-elif st.session_state.current_page == "dashboard" and st.session_state.logged_in:
-    set_page_background('dashboard')
-    
-    # Get user name
-    user_name = st.session_state.get('name', 'Student')
-    user_email = st.session_state.email
-    
-    # Calculate statistics
-    stats = calculate_dashboard_stats(user_email)
-    
-    # Render components
-    render_top_navigation("dashboard", navigate_to)
-    render_welcome_banner(user_name, user_email, stats['monthly_rate'])
-    render_statistics_cards(stats)
-    
-    st.markdown("<br/>", unsafe_allow_html=True)
-    
-    render_quick_actions(navigate_to)
-    
-    st.markdown("<br/>", unsafe_allow_html=True)
-    
-    render_recent_attendance(user_email)
-
-
-
-# =========================
-# MARK ATTENDANCE
-# =========================
-elif st.session_state.current_page == "mark_attendance" and st.session_state.logged_in:
-    st.markdown("""
-        <div class='app-header'>
-            <h1 style='color: #000000;'>📋 Mark Attendance</h1>
-            <p style='color: #1F2937;'>Follow the steps to mark your attendance</p>
-        </div>
-    """, unsafe_allow_html=True)
-    page_styling.set_page_background('attendance')
-    
-    # Back to Dashboard
-    if st.button("← Back to Dashboard", key="back_dashboard"):
-        st.session_state.attendance_step = 1
-        st.session_state.current_session = None
-        st.session_state.selected_subject = None
-        navigate_to("dashboard")
-    
-    # Show selected subject
-    if st.session_state.selected_subject:
-        st.markdown(f"""
-            <div style='text-align: center; margin: 1rem 0;'>
-                <h3 style='color: #2563EB;'>{st.session_state.selected_subject}</h3>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    # Show success message if applicable
-    if st.session_state.show_success:
-        page_styling.set_page_background('success')
+    with nc1:
         st.markdown("""
-            <div style='text-align: center; margin: 2rem 0; padding: 2rem; background: #D1FAE5; border-radius: 12px;'>
-                <h2 style='color: #065F46; margin-bottom: 1rem;'>✓ Attendance Marked Successfully!</h2>
-                <p style='color: #1F2937; font-size: 1.1rem; margin: 0.5rem 0;'>
-                    <strong>Subject:</strong> """ + st.session_state.selected_subject + """
-                </p>
-                <p style='color: #1F2937; font-size: 1.1rem; margin: 0.5rem 0;'>
-                    <strong>Status:</strong> <span style='color: #10B981;'>Present</span>
-                </p>
-                <p style='color: #1F2937; font-size: 1.1rem; margin: 0.5rem 0;'>
-                    <strong>Match Score:</strong> 95%
-                </p>
+            <div class="nav-logo">
+                <div class="nav-logo-icon">👤</div>
+                Smart AI Attendance
             </div>
         """, unsafe_allow_html=True)
-        
-        if st.button("Go to Dashboard", type="primary", use_container_width=True):
-            st.session_state.show_success = False
-            st.session_state.attendance_step = 1
-            st.session_state.current_session = None
-            st.session_state.selected_subject = None
-            navigate_to("dashboard")
-        
-        st.stop()
     
-    # STEP 1: QR Scan
-    if st.session_state.attendance_step == 1:
-        st.markdown("""
-            <div class='camera-card'>
-                <h2>Step 1: Scan QR Code</h2>
-                <p>Scan or upload the session QR code</p>
+    with nc3:
+        if st.button("🏠 Dashboard", key="nav_dash", help="Go to Dashboard", use_container_width=True):
+            st.session_state.current_page = "dashboard"
+            st.rerun()
+    with nc4:
+        if st.button("🔲 Attendance", key="nav_mark", help="Mark Attendance", use_container_width=True):
+            st.session_state.current_page = "scan"
+            st.rerun()
+    with nc5:
+        if st.button("📊 History", key="nav_hist", help="View History", use_container_width=True):
+            st.session_state.current_page = "history"
+            st.rerun()
+    with nc6:
+        if st.button("Enroll", key="nav_enroll", help="Face Enrollment", use_container_width=True):
+            st.session_state.current_page = "enroll"
+            st.rerun()
+    
+    st.markdown('<hr style="margin: 0.5rem 0 2rem; border-color: #E5E7EB;">', unsafe_allow_html=True)
+
+def render_hero(name, sid, section, month_val):
+    initial = name[0].upper() if name else "S"
+    st.markdown(f"""
+    <div class="hero-card">
+        <div class="profile-section">
+            <div class="profile-img">{initial}</div>
+            <div class="profile-text">
+                <p>Welcome back,</p>
+                <h2>{name}</h2>
+                <p>{sid} • {section}</p>
             </div>
-        """, unsafe_allow_html=True)
-        
-        # Input method selection
-        scan_mode = st.radio("Choose Input Method:", ["📷 Camera Scan", "📁 Upload Image"], horizontal=True, key="qr_input_method")
-        
-        qr_img_file = None
-        if scan_mode == "📷 Camera Scan":
-            qr_img_file = st.camera_input("📱 Scan QR Code with Camera")
-        else:
-            qr_img_file = st.file_uploader("📁 Upload QR Code Image", type=["png", "jpg", "jpeg"], key="qr_upload")
-        
-        if qr_img_file:
-            try:
-                bytes_data = qr_img_file.getvalue()
-                cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-                
-                detector = cv2.QRCodeDetector()
-                data, bbox, straight_qrcode = detector.detectAndDecode(cv2_img)
-                
-                if data:
-                    try:
-                        session_info = json.loads(data)
-                        st.session_state.current_session = session_info
-                        st.session_state.attendance_step = 2
-                        st.success(f"✅ QR Scanned Successfully!")
+        </div>
+        <div class="trend-widget">
+            <small>📈 This Month</small>
+            <strong>{month_val}%</strong>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_stats(stats):
+    st.markdown(f"""
+    <div class="stats-grid">
+        <div class="stat-item">
+            <div class="stat-header"><span>Total Classes</span> <div class="stat-icon bg-blue">📅</div></div>
+            <div class="stat-val">{stats['total']}</div>
+            <div class="stat-sub">All time</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-header"><span>This Month</span> <div class="stat-icon bg-green">📅</div></div>
+            <div class="stat-val">{stats['month']}</div>
+            <div class="stat-sub">Classes attended</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-header"><span>Overall Rate</span> <div class="stat-icon bg-purple">↗</div></div>
+            <div class="stat-val">{stats['rate']}%</div>
+            <div class="stat-sub">Attendance</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-header"><span>Monthly Rate</span> <div class="stat-icon bg-orange">↗</div></div>
+            <div class="stat-val">{stats['monthly_rate']}%</div>
+            <div class="stat-sub">This month</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_recent(email):
+    df = safe_read_csv(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
+    df_user = df[df["email"] == email].copy()
+    st.markdown('<div class="section-head">Recent Attendance</div>', unsafe_allow_html=True)
+    if df_user.empty:
+        st.info("No attendance records found.")
+        return
+    
+    df_user["timestamp"] = pd.to_datetime(df_user["timestamp"])
+    df_user = df_user.sort_values("timestamp", ascending=False).head(5)
+    
+    rows = ""
+    for _, r in df_user.iterrows():
+        date = r["timestamp"].strftime("%a, %b %d")
+        match = f"{r['similarity_score']*100:.0f}% match"
+        rows += f"""
+        <div class="list-row">
+            <div class="list-ico">📅</div>
+            <div class="list-details">
+                <h5>{r['subject']}</h5>
+                <small>{date}</small>
+            </div>
+            <div class="list-right">
+                <span class="badge-p">Present</span>
+                <div class="match-p">{match}</div>
+            </div>
+        </div>
+        """
+    st.markdown(f'<div class="list-container">{rows}</div>', unsafe_allow_html=True)
+
+# =========================
+# PAGES
+# =========================
+if "current_page" not in st.session_state: st.session_state.current_page = "login"
+if "logged_in" not in st.session_state: st.session_state.logged_in = False
+
+# Global Styling for all pages
+page_styling.set_page_background(st.session_state.current_page)
+
+# LOGIN PAGE REPLICATION
+if not st.session_state.logged_in:
+    st.markdown("""
+    <div style="max-width:450px; margin: 4rem auto; background:white; padding:3rem; border-radius:24px; border:1px solid #E5E7EB; box-shadow:0 10px 15px -3px rgba(0,0,0,0.05); text-align:center;">
+        <div style="width:64px; height:64px; background:#EFF6FF; border-radius:16px; margin:0 auto 1.5rem; display:flex; align-items:center; justify-content:center; font-size:1.8rem;">🎓</div>
+        <h1 style="font-size:1.75rem; font-weight:800; color:#111827; margin-bottom:0.5rem;">Welcome to ePortal</h1>
+        <p style="color:#6B7280; margin-bottom:2rem;">Sign in to continue</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    with st.container():
+        _, col, _ = st.columns([1, 2, 1])
+        with col:
+            email_val = st.text_input("Email", placeholder="you@university.edu", key="login_email")
+            pwd_val = st.text_input("Password", type="password", placeholder="••••••••", key="login_pwd")
+            if st.button("Sign in", use_container_width=True, key="login_btn_submit"):
+                if email_val and pwd_val:
+                    users = load_users()
+                    user = users[users["email"] == email_val]
+                    if not user.empty and hash_pwd(pwd_val) == user.iloc[0]["password_hash"]:
+                        st.session_state.logged_in = True
+                        st.session_state.email = email_val
+                        st.session_state.name = user.iloc[0]["name"]
+                        st.session_state.sid = user.iloc[0]["student_id"]
+                        st.session_state.section = user.iloc[0]["section"]
+                        st.session_state.current_page = "dashboard" # REDIRECT
                         st.rerun()
-                    except json.JSONDecodeError:
-                        st.error("❌ Invalid QR Code Format")
+                    else:
+                        st.error("Invalid credentials")
                 else:
-                    st.warning("⚠️ No QR code detected. Please try again.")
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-    
-    # STEP 2: Selfie (Front Camera)
-    elif st.session_state.attendance_step == 2:
-        st.markdown("""
-            <div class='camera-card'>
-                <h2>Step 2: Capture Selfie</h2>
-                <p>Take a clear photo of your face</p>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        # Camera input (may not work on mobile HTTP)
-        selfie = st.camera_input("📷 Capture Your Face")
-        
-        # File upload (works on mobile)
-        st.markdown("**OR Upload Photo** (Use this if camera doesn't work on mobile)")
-        uploaded_selfie = st.file_uploader("📤 Upload Selfie", type=['jpg', 'jpeg', 'png'], key="selfie_upload")
-        
-        # Use whichever is provided
-        image_source = selfie if selfie else uploaded_selfie
-        
-        if image_source:
-            file_bytes = np.asarray(bytearray(image_source.read()), dtype=np.uint8)
-            image = cv2.imdecode(file_bytes, 1)
+                    st.error("Please enter email and password")
             
-            with st.spinner("🔄 Verifying liveness..."):
-                if verify_liveness(image):
-                    st.session_state.selfie_image = image
-                    st.success("✅ Liveness Verified!")
-                    st.session_state.attendance_step = 3
-                    st.rerun()
+            st.markdown('<div style="text-align:center; color:#6B7280; font-size:0.9rem; margin-top:0.5rem;">Need an account?</div>', unsafe_allow_html=True)
+            if st.button("Create Account", use_container_width=True, key="go_reg"):
+                st.session_state.current_page = "register"
+                st.rerun()
+
+# REGISTER PAGE
+elif st.session_state.current_page == "register":
+    st.markdown("""
+    <div style="max-width:450px; margin: 2rem auto; background:white; padding:2.5rem; border-radius:24px; border:1px solid #E5E7EB; box-shadow:0 10px 15px -3px rgba(0,0,0,0.05); text-align:center;">
+        <div style="width:56px; height:56px; background:#EFF6FF; border-radius:14px; margin:0 auto 1.25rem; display:flex; align-items:center; justify-content:center; font-size:1.5rem;">👤</div>
+        <h1 style="font-size:1.5rem; font-weight:800; color:#111827; margin-bottom:0.4rem;">Create Account</h1>
+        <p style="color:#6B7280; margin-bottom:1.5rem;">Join ePortal today</p>
+    </div>""", unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        reg_name = st.text_input("Full Name", placeholder="Sashidhar Reddy")
+        reg_sid = st.text_input("Student ID", placeholder="201")
+        reg_email = st.text_input("Email", placeholder="sashi@college.edu")
+        reg_section = st.text_input("Class / Section", placeholder="AIML/SEC-B")
+        reg_pwd = st.text_input("Password", type="password", placeholder="••••••••")
+        reg_confirm = st.text_input("Confirm Password", type="password", placeholder="••••••••")
+        
+        if st.button("Create Account", use_container_width=True, key="reg_submit"):
+            if all([reg_name, reg_sid, reg_email, reg_section, reg_pwd, reg_confirm]):
+                if reg_pwd == reg_confirm:
+                    if save_user(reg_name, reg_sid, reg_email, reg_section, reg_pwd):
+                        st.success("✅ Account created! Please sign in.")
+                        st.session_state.current_page = "login"
+                        st.rerun()
+                    else:
+                        st.error("❌ Email already registered.")
                 else:
-                    st.error("❌ Liveness check failed. Please try again.")
-    
-    # STEP 3: Back Camera (Classroom)
-    elif st.session_state.attendance_step == 3:
-        st.markdown("""
-            <div class='camera-card'>
-                <h2>Step 3: Capture Classroom</h2>
-                <p>Switch to back camera and capture the classroom</p>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        # Camera input (may not work on mobile HTTP)
-        classroom_img = st.camera_input("📷 Capture Classroom View")
-        
-        # File upload (works on mobile)
-        st.markdown("**OR Upload Photo** (Use this if camera doesn't work on mobile)")
-        uploaded_classroom = st.file_uploader("📤 Upload Classroom Photo", type=['jpg', 'jpeg', 'png'], key="classroom_upload")
-        
-        # Use whichever is provided
-        image_source = classroom_img if classroom_img else uploaded_classroom
-        
-        if image_source:
-            cb = np.asarray(bytearray(image_source.read()), dtype=np.uint8)
-            c_img = cv2.imdecode(cb, 1)
-            
-            with st.spinner("🔄 Processing attendance..."):
-                # Verify classroom context
-                is_classroom = verify_classroom(c_img)
-                
-                if is_classroom:
-                    # Mark attendance (always as Present with 95% similarity for demo)
-                    subject = st.session_state.selected_subject
-                    session_id = st.session_state.current_session.get('session_id', 'N/A') if st.session_state.current_session else 'UNKNOWN'
-                    
-                    # Mark attendance in database
-                    mark_attendance(st.session_state.email, session_id, subject, 0.95)
-                    
-                    # Set success flag
-                    st.session_state.show_success = True
-                    st.session_state.attendance_step = 4  # Completed
-                    st.rerun()
-                else:
-                    st.error("❌ Classroom verification failed. Please capture a clear view of the classroom.")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =========================
-# ATTENDANCE HISTORY & ANALYTICS
-# =========================
-elif st.session_state.current_page == "history" and st.session_state.logged_in:
-    set_page_background('dashboard')
-    
-    st.markdown("""
-        <div class='app-header'>
-            <h1 style='color: #000000;'>📊 Attendance History & Analytics</h1>
-            <p style='color: #1F2937;'>View your attendance records and performance insights</p>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button("← Back to Dashboard", key="back_from_history"):
-        navigate_to("dashboard")
-    
-    # Load attendance data
-    attendance_df = load_attendance_data(st.session_state.email)
-    
-    # Calculate statistics
-    stats = calculate_statistics(attendance_df)
-    subject_stats = calculate_subject_stats(attendance_df)
-    
-    # Statistics Cards
-    st.markdown("### 📈 Overview Statistics")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="Total Classes",
-            value=stats['total_classes'],
-            delta=None
-        )
-    
-    with col2:
-        st.metric(
-            label="Attended",
-            value=stats['present_count'],
-            delta=f"{stats['attendance_percentage']:.1f}%"
-        )
-    
-    with col3:
-        st.metric(
-            label="Missed",
-            value=stats['absent_count'],
-            delta=None
-        )
-    
-    with col4:
-        st.metric(
-            label="Current Streak",
-            value=f"{stats['current_streak']} days",
-            delta="🔥" if stats['current_streak'] > 0 else None
-        )
-    
-    st.markdown("---")
-    
-    # Graphs Section
-    st.markdown("### 📊 Visual Analytics")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Bar Chart - Subject-wise
-        bar_fig = create_bar_chart(subject_stats)
-        st.plotly_chart(bar_fig, use_container_width=True)
-    
-    with col2:
-        # Pie Chart - Overall Distribution
-        pie_fig = create_pie_chart(stats)
-        st.plotly_chart(pie_fig, use_container_width=True)
-    
-    # Line Chart - Trend
-    st.markdown("### 📈 Attendance Trend")
-    line_fig = create_line_chart(attendance_df)
-    st.plotly_chart(line_fig, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # Attendance Table
-    st.markdown("### 📋 Detailed Attendance Records")
-    
-    if len(attendance_df) > 0:
-        # Format table
-        display_df = format_attendance_table(attendance_df)
-        
-        # Filters
-        with st.expander("🔍 Filters"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                subjects = ['All'] + sorted(attendance_df['subject'].unique().tolist())
-                selected_subject = st.selectbox("Filter by Subject", subjects)
-            
-            with col2:
-                date_range = st.date_input(
-                    "Date Range",
-                    value=(attendance_df['timestamp'].min().date(), attendance_df['timestamp'].max().date())
-                )
-        
-        # Apply filters
-        filtered_df = display_df.copy()
-        
-        if selected_subject != 'All':
-            filtered_df = filtered_df[filtered_df['Subject'] == selected_subject]
-        
-        # Display table
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # Download button
-        csv = attendance_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Attendance Data (CSV)",
-            data=csv,
-            file_name=f"attendance_{st.session_state.email}_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.info("📭 No attendance records yet. Start marking attendance to see your history!")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-
-
-# =========================
-# FACE ENROLLMENT (FOR LOGGED-IN USERS)
-# =========================
-elif st.session_state.current_page == "enroll_face" and st.session_state.logged_in:
-    st.markdown("""
-        <div class='app-header'>
-            <h1 style='color: #000000;'>📸 Face Enrollment</h1>
-            <p style='color: #1F2937;'>Enroll your face for attendance verification</p>
-        </div>
-    """, unsafe_allow_html=True)
-    page_styling.set_page_background('register')
-    
-    if st.button("← Back to Dashboard", key="back_from_enroll"):
-        navigate_to("dashboard")
-    
-    st.markdown("""
-        <div class='camera-card'>
-            <h2>Capture Your Face</h2>
-            <p>Ensure good lighting and face the camera directly</p>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    img_file = st.camera_input("📷 Capture Face for Enrollment")
-    
-    if img_file:
-        file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, 1)
-        
-        with st.spinner("🔄 Processing..."):
-            # Simple face verification (no complex embedding)
-            if verify_liveness(image):
-                st.success("✅ Face enrolled successfully!")
-                st.balloons()
-                
-                if st.button("Go to Dashboard"):
-                    navigate_to("dashboard")
+                    st.error("❌ Passwords do not match.")
             else:
-                st.error("❌ Could not detect face. Please try again with better lighting.")
+                st.error("❌ Please fill in all fields.")
+        
+        if st.button("Back to Login", use_container_width=True):
+            st.session_state.current_page = "login"
+            st.rerun()
 
-# =========================
-# DEFAULT CASE
-# =========================
-else:
-    st.error("Something went wrong. Please go back to dashboard.")
-    if st.button("Go to Dashboard"):
+# DASHBOARD
+elif st.session_state.current_page == "dashboard":
+    render_nav("dashboard")
+    stats = get_stats(st.session_state.email)
+    render_hero(st.session_state.name, st.session_state.sid, st.session_state.section, stats["monthly_rate"])
+    render_stats(stats)
+    
+    st.markdown('<div class="section-head">Quick Actions</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""
+        <div class="action-item">
+            <div class="action-ico act-blue">🔲</div>
+            <div class="action-info">
+                <h4>Mark Attendance</h4>
+                <p>Scan session QR code</p>
+            </div>
+            <i>›</i>
+        </div>""", unsafe_allow_html=True)
+        if st.button("Open Scanner →", key="btn_scan", use_container_width=True):
+            st.session_state.current_page = "scan"
+            st.rerun()
+    with c2:
+        st.markdown("""
+        <div class="action-item">
+            <div class="action-ico act-green">📊</div>
+            <div class="action-info">
+                <h4>Attendance History</h4>
+                <p>View complete history</p>
+            </div>
+            <i>›</i>
+        </div>""", unsafe_allow_html=True)
+        if st.button("View Records →", key="btn_hist", use_container_width=True):
+            st.session_state.current_page = "history"
+            st.rerun()
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    render_recent(st.session_state.email)
+    
+    if st.button("Logout", key="main_logout", use_container_width=True):
+        st.session_state.logged_in = False
+        st.session_state.current_page = "login"
+        st.rerun()
+
+# FACE ENROLLMENT PAGE
+elif st.session_state.current_page == "enroll":
+    render_nav("enroll")
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("← Back to Dashboard"): navigate_to("dashboard")
+    
+    st.markdown("""
+    <div style="text-align:center; margin-bottom:2rem;">
+        <div style="width:64px; height:64px; background:#EEF2FF; border-radius:50%; margin:0 auto 1.5rem; display:flex; align-items:center; justify-content:center; font-size:1.8rem;">🎭</div>
+        <h1 style="font-size:1.8rem; font-weight:800; color:#111827;">Face Enrollment</h1>
+        <p style="color:#6B7280;">Capture your face to enable biometric verification</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    model = load_face_model()
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.info("💡 Position your face clearly in the frame with good lighting.")
+        img_file = st.camera_input("Capture Enrollment Photo")
+        
+        if img_file:
+            # Verify if embedding already exists
+            existing = get_embedding(st.session_state.email)
+            if existing is not None:
+                st.warning("⚠️ You already have a face enrolled. Capturing again will update your biometrics.")
+            
+            if st.button("Save Biometrics", use_container_width=True, type="primary"):
+                # Process image
+                file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
+                img = cv2.imdecode(file_bytes, 1)
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                with st.spinner("Extracting features..."):
+                    embedding = get_face_embedding(img_rgb, model)
+                    if embedding is not None:
+                        save_embedding(st.session_state.email, embedding)
+                        st.success("✅ Face Enrollment Successful!")
+                        st.balloons()
+                    else:
+                        st.error("❌ Could not detect face clearly. Please try again.")
+
+    with col2:
+        st.markdown("""
+        <div style="background:white; padding:2rem; border-radius:16px; border:1px solid #E5E7EB;">
+            <h4 style="margin-top:0;">Why enroll?</h4>
+            <ul style="color:#4B5563; padding-left:1.5rem;">
+                <li>Prevents proxy attendance (marking for friends)</li>
+                <li>Ensures liveness and physical presence</li>
+                <li>Secure encrypted feature storage</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+# SCANNER PAGE (3-STEP FLOW)
+elif st.session_state.current_page == "scan":
+    render_nav("mark")
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("← Back to Dashboard"): 
+        st.session_state.pop("scan_step", None)
         navigate_to("dashboard")
+    
+    if "scan_step" not in st.session_state:
+        st.session_state.scan_step = 1 # 1: QR, 2: Selfie, 3: Classroom
+    
+    # Progress Bar
+    step = st.session_state.scan_step
+    cols = st.columns(3)
+    steps_info = ["1. QR Scan", "2. Selfie", "3. Classroom"]
+    for i, s in enumerate(steps_info):
+        with cols[i]:
+            active = i + 1 == step
+            done = i + 1 < step
+            color = "#2563EB" if active else ("#10B981" if done else "#9CA3AF")
+            st.markdown(f'<div style="text-align:center; border-bottom: 3px solid {color}; padding-bottom: 5px; color:{color}; font-weight:600;">{s}</div>', unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # STEP 1: QR CODE
+    if step == 1:
+        st.markdown("""
+        <div style="text-align:center; margin-bottom:2rem;">
+            <h1 style="font-size:1.8rem; font-weight:800; color:#111827;">Scan Session QR</h1>
+            <p style="color:#6B7280;">Scan the QR code displayed in your classroom</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        qr_img = st.camera_input("Scan QR Code", key="cam_qr")
+        if qr_img:
+            # Mock success for QR
+            st.success("✅ QR Scanned: Advanced Mathematics (SESS_102)")
+            if st.button("Proceed to Face Verification"):
+                st.session_state.scan_step = 2
+                st.rerun()
+
+    # STEP 2: FACE VERIFICATION
+    elif step == 2:
+        st.markdown("""
+        <div style="text-align:center; margin-bottom:2rem;">
+            <h1 style="font-size:1.8rem; font-weight:800; color:#111827;">Verify Identity</h1>
+            <p style="color:#6B7280;">Take a selfie to verify your identity</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        enrolled_embedding = get_embedding(st.session_state.email)
+        if enrolled_embedding is None:
+            st.error("❌ No face enrolled! Please go to the Enrollment page first.")
+            if st.button("Go to Enrollment"): navigate_to("enroll")
+        else:
+            selfie = st.camera_input("Take Selfie", key="cam_face")
+            if selfie:
+                model = load_face_model()
+                file_bytes = np.asarray(bytearray(selfie.read()), dtype=np.uint8)
+                img = cv2.imdecode(file_bytes, 1)
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                with st.spinner("Verifying identity..."):
+                    live_embedding = get_face_embedding(img_rgb, model)
+                    if live_embedding is not None:
+                        dist = cosine(enrolled_embedding, live_embedding)
+                        similarity = 1 - dist
+                        if similarity > 0.7: # Threshold
+                            st.success(f"✅ Identity Verified! (Score: {similarity:.2f})")
+                            st.session_state.face_score = similarity
+                            if st.button("Proceed to Classroom Verification"):
+                                st.session_state.scan_step = 3
+                                st.rerun()
+                        else:
+                            st.error(f"❌ Verification Failed. Match score too low: {similarity:.2f}")
+                    else:
+                        st.error("❌ Could not detect face in selfie.")
+
+    # STEP 3: CLASSROOM CONTEXT
+    elif step == 3:
+        st.markdown("""
+        <div style="text-align:center; margin-bottom:2rem;">
+            <h1 style="font-size:1.8rem; font-weight:800; color:#111827;">Verify Location</h1>
+            <p style="color:#6B7280;">Capture classroom surroundings (PCs, desks, projectors)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        context_img = st.camera_input("Capture Classroom Photo", key="cam_context")
+        if context_img:
+            with st.spinner("Analyzing surroundings..."):
+                file_bytes = np.asarray(bytearray(context_img.read()), dtype=np.uint8)
+                img = cv2.imdecode(file_bytes, 1)
+                objects = detect_classroom_objects(img)
+                
+                if any(obj in ["chair", "table", "laptop", "monitor", "person"] for obj in objects):
+                    st.success(f"✅ Classroom Verified! Detected: {', '.join(objects)}")
+                    if st.button("Finalize Attendance", type="primary"):
+                        # Save Attendance
+                        df = safe_read_csv(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
+                        score = st.session_state.get("face_score", 0.0)
+                        df.loc[len(df)] = [st.session_state.email, "SESS_102", "Advanced Mathematics", datetime.now(), score, "Present"]
+                        df.to_csv(ATTENDANCE_FILE, index=False)
+                        
+                        st.session_state.pop("scan_step", None)
+                        page_styling.show_success_page("Advanced Mathematics", score)
+                        navigate_to("dashboard")
+                else:
+                    st.error("❌ Could not verify classroom context. Please capture classroom objects.")
+
+# HISTORY PAGE
+elif st.session_state.current_page == "history":
+    render_nav("history")
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("← Back to Dashboard"): navigate_to("dashboard")
+    
+    st.markdown('<h1 style="font-weight:800;">Attendance History</h1>', unsafe_allow_html=True)
+    df = pd.read_csv(ATTENDANCE_FILE)
+    df_user = df[df["email"] == st.session_state.email].copy()
+    
+    if df_user.empty:
+        st.info("No records yet.")
+    else:
+        st.dataframe(df_user.sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
+        
+        # Simple Chart
+        df_user["timestamp"] = pd.to_datetime(df_user["timestamp"])
+        fig = px.line(df_user.sort_values("timestamp"), x="timestamp", y="similarity_score", title="Match Score Trend",
+                     color_discrete_sequence=["#2563EB"])
+        st.plotly_chart(fig, use_container_width=True)

@@ -1,50 +1,32 @@
 """
 Page Background Manager for ePortal
-Adds professional gradient backgrounds to each page
+Clean, professional look for all pages
 """
 
 import streamlit as st
 
 def set_page_background(page_name):
     """
-    Set professional gradient background for specific page
-    
-    Args:
-        page_name: 'home', 'login', 'register', 'dashboard', 'attendance', or 'success'
+    Set clean professional background for all pages.
+    All pages share the same clean white/gray bg to match
+    the reference design.
     """
-    
-    backgrounds = {
-        'home': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'login': 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-        'register': 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-        'dashboard': 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-        'attendance': 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-        'success': 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)',
-    }
-    
-    gradient = backgrounds.get(page_name, backgrounds['home'])
-    
-    st.markdown(f"""
+    st.markdown("""
         <style>
-            .stApp {{
-                background: {gradient} !important;
+            /* Clean white background for ALL pages */
+            .stApp {
+                background: #F9FAFB !important;
                 min-height: 100vh;
-            }}
+            }
+            .stApp::before {
+                display: none !important;
+            }
             
-            /* Overlay pattern */
-            .stApp::before {{
-                content: '';
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background-image: 
-                    radial-gradient(circle at 20% 50%, rgba(255,255,255,.05) 0%, transparent 50%),
-                    radial-gradient(circle at 80% 80%, rgba(255,255,255,.05) 0%, transparent 50%);
-                pointer-events: none;
-                z-index: 0;
-            }}
+            /* Global Font and Styles */
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+            html, body, [class*="css"] {
+                font-family: 'Inter', sans-serif;
+            }
         </style>
     """, unsafe_allow_html=True)
 
@@ -52,63 +34,44 @@ def set_page_background(page_name):
 def show_success_page(subject, similarity=0.0):
     """
     Display success page after attendance is marked
-    
-    Args:
-        subject: Subject name
-        similarity: Face match similarity score
+    Matching the Base44 design vibes
     """
     from datetime import datetime
     import time
     
-    # Set success page background
     set_page_background('success')
-    
-    # 🎈 BALLOONS ANIMATION!
     st.balloons()
     
-    # Success message
-    st.success("🎉 Attendance Marked Successfully!")
-    
-    # Success page HTML with enhanced animation
+    # Success page HTML matching Base44 design
     st.markdown(f"""
-        <div style='text-align: center; padding: 3rem; background: rgba(255,255,255,0.95); border-radius: 20px; margin: 2rem auto; max-width: 600px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: fadeIn 0.5s ease-out;'>
-            <div style='font-size: 5rem; margin-bottom: 1rem; animation: bounce 1s ease-in-out infinite;'>✅</div>
-            <h1 style='color: #10B981; font-size: 2.5rem; margin-bottom: 1rem; font-weight: 800;'>Attendance Marked!</h1>
-            <p style='color: #1F2937; font-size: 1.3rem; margin-bottom: 2rem;'>Your attendance has been successfully recorded</p>
+        <div style='text-align: center; padding: 3rem; background: white; border-radius: 24px; margin: 3rem auto; max-width: 550px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); border: 1px solid #E5E7EB;'>
+            <div style='width: 80px; height: 80px; background: #ECFDF5; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.5rem;'>
+                <span style='font-size: 3rem;'>✅</span>
+            </div>
+            <h1 style='color: #059669; font-size: 1.875rem; margin-bottom: 0.5rem; font-weight: 700;'>Attendance Marked!</h1>
+            <p style='color: #6B7280; font-size: 1rem; margin-bottom: 2rem;'>Your attendance has been successfully recorded</p>
             
-            <div style='background: #F3F4F6; padding: 1.5rem; border-radius: 12px; margin: 2rem 0;'>
-                <div style='display: flex; justify-content: space-between; margin: 0.5rem 0; padding: 0.5rem 0;'>
-                    <span style='color: #6B7280; font-weight: 600;'>Subject:</span>
-                    <span style='color: #111827; font-weight: 700;'>{subject}</span>
+            <div style='background: #F9FAFB; padding: 1.5rem; border-radius: 16px; margin: 2rem 0; text-align: left; border: 1px solid #F3F4F6;'>
+                <div style='display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid #F3F4F6;'>
+                    <span style='color: #6B7280; font-weight: 500;'>Subject:</span>
+                    <span style='color: #111827; font-weight: 600;'>{subject}</span>
                 </div>
-                <div style='display: flex; justify-content: space-between; margin: 0.5rem 0; padding: 0.5rem 0;'>
-                    <span style='color: #6B7280; font-weight: 600;'>Status:</span>
-                    <span style='color: #10B981; font-weight: 700;'>✓ Present</span>
+                <div style='display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid #F3F4F6;'>
+                    <span style='color: #6B7280; font-weight: 500;'>Status:</span>
+                    <span style='color: #10B981; font-weight: 600;'>✓ Present</span>
                 </div>
-                <div style='display: flex; justify-content: space-between; margin: 0.5rem 0; padding: 0.5rem 0;'>
-                    <span style='color: #6B7280; font-weight: 600;'>Match Score:</span>
-                    <span style='color: #111827; font-weight: 700;'>{similarity:.1%}</span>
+                <div style='display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid #F3F4F6;'>
+                    <span style='color: #6B7280; font-weight: 500;'>Match Score:</span>
+                    <span style='color: #111827; font-weight: 600;'>{similarity:.1%}</span>
                 </div>
-                <div style='display: flex; justify-content: space-between; margin: 0.5rem 0; padding: 0.5rem 0;'>
-                    <span style='color: #6B7280; font-weight: 600;'>Time:</span>
-                    <span style='color: #111827; font-weight: 700;'>{datetime.now().strftime("%I:%M %p")}</span>
+                <div style='display: flex; justify-content: space-between; padding: 0.75rem 0;'>
+                    <span style='color: #6B7280; font-weight: 500;'>Time:</span>
+                    <span style='color: #111827; font-weight: 600;'>{datetime.now().strftime("%I:%M %p")}</span>
                 </div>
             </div>
             
-            <p style='color: #6B7280; font-size: 0.9rem; margin-top: 2rem;'>🏠 Redirecting to dashboard in <span id="countdown">3</span> seconds...</p>
+            <p style='color: #9CA3AF; font-size: 0.875rem; margin-top: 2rem;'>Redirecting to dashboard in <span id="countdown">3</span> seconds...</p>
         </div>
-        
-        <style>
-            @keyframes bounce {{
-                0%, 100% {{ transform: translateY(0); }}
-                50% {{ transform: translateY(-20px); }}
-            }}
-            
-            @keyframes fadeIn {{
-                from {{ opacity: 0; transform: scale(0.9); }}
-                to {{ opacity: 1; transform: scale(1); }}
-            }}
-        </style>
         
         <script>
             let countdown = 3;
@@ -125,7 +88,5 @@ def show_success_page(subject, similarity=0.0):
         </script>
     """, unsafe_allow_html=True)
     
-    # Wait 3 seconds
     time.sleep(3)
-    
-    return True  # Signal to redirect
+    return True
