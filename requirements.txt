@@ -1,0 +1,11 @@
+streamlit
+opencv-python-headless
+numpy
+pandas
+plotly
+mediapipe
+scipy
+tensorflow
+keras-facenet
+mtcnn
+Pillow
