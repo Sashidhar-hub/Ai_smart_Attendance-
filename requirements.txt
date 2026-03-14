@@ -7,3 +7,5 @@ mediapipe
 scipy
 tensorflow
 keras-facenet
+mtcnn
+Pillow
