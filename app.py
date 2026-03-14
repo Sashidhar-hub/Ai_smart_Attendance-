@@ -37,7 +37,13 @@ st.set_page_config(page_title="Smart AI Attendance", layout="wide", page_icon="ð
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.csv")
-ATTENDANCE_FILE = os.path.join(DATA_DIR, "attendance.csv")
+ATTENDANCE_FILE = os.path.join("data", "attendance.csv")
+SELFIE_DIR = os.path.join("data", "images", "selfies")
+CLASSROOM_DIR = os.path.join("data", "images", "classrooms")
+
+# Ensure directories exist
+os.makedirs(SELFIE_DIR, exist_ok=True)
+os.makedirs(CLASSROOM_DIR, exist_ok=True)
 
 def init_data_file(file_path, cols):
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
@@ -1036,9 +1042,12 @@ elif st.session_state.current_page == "scan":
             selfie = st.camera_input("Take Selfie", key="cam_face")
             st.markdown('</div>', unsafe_allow_html=True)
             if selfie:
+                # Save to session state to finalize later
+                st.session_state.temp_selfie = selfie.getvalue()
+                
                 model = load_face_model()
                 # Process image using PIL pipeline
-                img_pil = Image.open(io.BytesIO(selfie.read())).convert('RGB')
+                img_pil = Image.open(io.BytesIO(st.session_state.temp_selfie)).convert('RGB')
                 img_rgb = np.array(img_pil)
                 
                 with st.spinner("Verifying identity..."):
@@ -1084,10 +1093,36 @@ elif st.session_state.current_page == "scan":
                     st.success(f"âœ… Classroom Verified! Detected: {', '.join(objects)}")
                     if st.button("Finalize Attendance", type="primary"):
                         # Save Attendance
-                        df = safe_read_csv(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status"])
+                        # Create unique filenames
+                        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        selfie_filename = f"selfie_{st.session_state.email}_{timestamp_str}.jpg"
+                        classroom_filename = f"classroom_{st.session_state.email}_{timestamp_str}.jpg"
+                        
+                        selfie_path = os.path.join(SELFIE_DIR, selfie_filename)
+                        classroom_path = os.path.join(CLASSROOM_DIR, classroom_filename)
+                        
+                        # Save images
+                        if "temp_selfie" in st.session_state:
+                            with open(selfie_path, "wb") as f:
+                                f.write(st.session_state.temp_selfie)
+                        
+                        with open(classroom_path, "wb") as f:
+                            f.write(context_img.getvalue())
+
+                        df = safe_read_csv(ATTENDANCE_FILE, ["email", "session_id", "subject", "timestamp", "similarity_score", "status", "selfie_path", "classroom_path"])
                         score = st.session_state.get("face_score", 0.0)
                         session_id = st.session_state.get("current_session", "UNKNOWN")
-                        df.loc[len(df)] = [st.session_state.email, session_id, "Class Session", datetime.now(), score, "Present"]
+                        
+                        df.loc[len(df)] = [
+                            st.session_state.email, 
+                            session_id, 
+                            "Class Session", 
+                            datetime.now(), 
+                            score, 
+                            "Present",
+                            selfie_path,
+                            classroom_path
+                        ]
                         df.to_csv(ATTENDANCE_FILE, index=False)
                         
                         st.session_state.pop("scan_step", None)
