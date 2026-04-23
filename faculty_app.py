@@ -13,6 +13,48 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     
+    /* Subject Card Styles */
+    .subject-card {
+        background: white;
+        border-radius: 16px;
+        padding: 1.5rem;
+        border: 1px solid #E5E7EB;
+        transition: all 0.2s ease;
+        cursor: pointer;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }
+    .subject-card:hover {
+        border-color: #4F46E5;
+        box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.1);
+        transform: translateY(-2px);
+    }
+    .subject-tag {
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: #4F46E5;
+        background: #EEF2FF;
+        padding: 0.25rem 0.5rem;
+        border-radius: 6px;
+        width: fit-content;
+        margin-bottom: 0.75rem;
+    }
+    .subject-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #111827;
+        margin-bottom: 0.5rem;
+    }
+    .subject-stats {
+        font-size: 0.85rem;
+        color: #6B7280;
+        margin-top: auto;
+    }
+    
+    
     .stApp {
         background: #F9FAFB !important;
     }
@@ -158,6 +200,16 @@ DATA_DIR = "data"
 USERS_FILE = os.path.join(DATA_DIR, "users.csv")
 ATTENDANCE_FILE = os.path.join(DATA_DIR, "attendance.csv")
 
+# ================= Constants =================
+AVAILABLE_SUBJECTS = ["Artificial Intelligence", "Machine Learning", "Data Structures", "Web Development", "Computer Networks"]
+AVAILABLE_SECTIONS = ["AIML-A", "AIML-B", "AIML-C", "CS-A", "CS-B"]
+
+def navigate_to_absentees(subject, section="All Sections"):
+    st.session_state.sel_subject = subject
+    st.session_state.sel_section = section
+    st.session_state.current_view = "absentees"
+    st.rerun()
+
 def safe_read_csv(file_path, cols):
     if not os.path.exists(file_path):
         return pd.DataFrame(columns=cols)
@@ -178,6 +230,10 @@ if "faculty_authenticated" not in st.session_state:
     st.session_state.faculty_authenticated = False
 if "current_view" not in st.session_state:
     st.session_state.current_view = "dashboard"
+if "sel_subject" not in st.session_state:
+    st.session_state.sel_subject = AVAILABLE_SUBJECTS[0]
+if "sel_section" not in st.session_state:
+    st.session_state.sel_section = "All Sections"
 
 # ================= LOGIN PAGE =================
 if not st.session_state.faculty_authenticated:
@@ -314,6 +370,46 @@ if st.session_state.current_view == "dashboard":
     </div>
     """, unsafe_allow_html=True)
     
+    # 2.5 Subject Quick Access Cards
+    st.markdown('<div class="section-title">📚 Your Assigned Subjects</div>', unsafe_allow_html=True)
+    st.markdown("<p style='color: #6B7280; margin-top:-1rem; margin-bottom: 1.5rem;'>Click on a subject to view today's absentees.</p>", unsafe_allow_html=True)
+    
+    cols = st.columns(3)
+    for i, subj in enumerate(AVAILABLE_SUBJECTS[:3]): # Show first 3 for layout
+        with cols[i]:
+             st.markdown(f"""
+             <div class="subject-card">
+                <div>
+                    <div class="subject-tag">Subject</div>
+                    <div class="subject-title">{subj}</div>
+                </div>
+                <div class="subject-stats">
+                    Active Session • 2 Sections
+                </div>
+             </div>
+             """, unsafe_allow_html=True)
+             if st.button(f"View {subj}", key=f"btn_{subj}", use_container_width=True):
+                 navigate_to_absentees(subj)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    cols2 = st.columns(3)
+    for i, subj in enumerate(AVAILABLE_SUBJECTS[3:5]): # Show next 2
+        with cols2[i]:
+             st.markdown(f"""
+             <div class="subject-card">
+                <div>
+                    <div class="subject-tag">Subject</div>
+                    <div class="subject-title">{subj}</div>
+                </div>
+                <div class="subject-stats">
+                    Active Session • 1 Section
+                </div>
+             </div>
+             """, unsafe_allow_html=True)
+             if st.button(f"View {subj}", key=f"btn_{subj}", use_container_width=True):
+                 navigate_to_absentees(subj)
+    
+    
     # 3. Recent Activity List
     st.markdown('<div class="section-title">⏱️ Real-time Activity Logs</div>', unsafe_allow_html=True)
     
@@ -394,24 +490,48 @@ elif st.session_state.current_view == "absentees":
     st.markdown('<div class="section-title">❌ Absentee Register</div>', unsafe_allow_html=True)
     
     st.markdown('<div class="content-box">', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([1.5, 1, 1])
     with col1:
-        subjects = attendance_df['subject'].unique().tolist() if 'subject' in attendance_df.columns else []
-        sel_subject = st.selectbox("Select Target Subject", subjects if subjects else ["All Classes"])
+        # Merge available subjects with those present in attendance data
+        all_subjects = sorted(list(set(AVAILABLE_SUBJECTS + (attendance_df['subject'].unique().tolist() if 'subject' in attendance_df.columns else []))))
+        try:
+            subj_idx = all_subjects.index(st.session_state.sel_subject)
+        except:
+            subj_idx = 0
+        sel_subject = st.selectbox("Select Subject", all_subjects, index=subj_idx)
+        st.session_state.sel_subject = sel_subject
+    
     with col2:
+        all_sections = ["All Sections"] + AVAILABLE_SECTIONS
+        try:
+            sec_idx = all_sections.index(st.session_state.sel_section)
+        except:
+            sec_idx = 0
+        sel_section = st.selectbox("Select Section", all_sections, index=sec_idx)
+        st.session_state.sel_section = sel_section
+
+    with col3:
         sel_date = st.date_input("Select Date", datetime.now().date())
     st.markdown('</div>', unsafe_allow_html=True)
         
+    # Filtering Logic
     if not attendance_df.empty:
-        if sel_subject and sel_subject != "All Classes":
-            present_emails = attendance_df[(attendance_df['date'] == sel_date) & (attendance_df['subject'] == sel_subject)]['email'].unique()
-        else:
-            present_emails = attendance_df[attendance_df['date'] == sel_date]['email'].unique()
+        attendance_filtered = attendance_df[attendance_df['date'] == sel_date]
+        if sel_subject != "All Classes":
+            attendance_filtered = attendance_filtered[attendance_filtered['subject'] == sel_subject]
+        present_emails = attendance_filtered['email'].unique()
     else:
         present_emails = []
         
     if not students_df.empty:
-        absent_df = students_df[~students_df['email'].isin(present_emails)]
+        # Filter students by section if selected
+        current_students = students_df.copy()
+        if sel_section != "All Sections":
+            # flexible matching for section names
+            current_students = current_students[current_students['section'].str.contains(sel_section.replace("-", "/"), case=False, na=False) | 
+                                                 current_students['section'].str.contains(sel_section, case=False, na=False)]
+        
+        absent_df = current_students[~current_students['email'].isin(present_emails)]
         
         if absent_df.empty:
             st.success("Perfect attendance today! 🎉")
